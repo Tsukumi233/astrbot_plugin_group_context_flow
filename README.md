@@ -9,6 +9,7 @@
 - 触发 LLM 时，插件只把当前触发消息之前、尚未注入当前 `conversation.cid` 的群聊增量追加到 `req.contexts`。
 - 当前触发 AI 的消息不放进 `group_flow_delta`，仍保留为 AstrBot 本轮 user prompt。
 - LLM 响应后推进 cursor，避免下一轮重复注入。
+- 如果平台把 LLM 回复回流成机器人自己的群消息，插件会无条件跳过；`record_self_messages` 只影响非 LLM 流程产生的机器人自身平台消息。
 - AstrBot 后续会把注入后的 messages 保存到 `conversation.history`，并继续使用自身的上下文截断或 LLM 压缩策略。
 
 ## Request Message 形态

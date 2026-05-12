@@ -60,6 +60,7 @@ class GroupContextFlowPlugin(Star):
         self.context = context
         self.config = config or {}
         self._locks: dict[str, asyncio.Lock] = {}
+        self._llm_self_message_cache: dict[str, list[dict[str, Any]]] = {}
         self.store = self._build_store()
 
     def _cfg(self, key: str, default: Any = None) -> Any:
@@ -109,6 +110,50 @@ class GroupContextFlowPlugin(Star):
         message = event.get_message_str()
         return str(message or "").strip()
 
+    def _message_fingerprint(self, value: Any) -> str:
+        return _clean_one_line(value)
+
+    def _remember_llm_self_message(self, event: AstrMessageEvent, resp: LLMResponse) -> None:
+        if event.get_message_type() != MessageType.GROUP_MESSAGE or not event.get_group_id():
+            return
+        if not resp or resp.role != "assistant":
+            return
+        text = self._message_fingerprint(resp.completion_text)
+        if not text:
+            return
+        flow_id = self._flow_id(event)
+        expires_at = time.time() + 180
+        cached_texts = {text}
+        chain = getattr(resp, "result_chain", None)
+        if chain and getattr(chain, "chain", None):
+            for comp in chain.chain:
+                comp_text = self._message_fingerprint(getattr(comp, "text", ""))
+                if comp_text:
+                    cached_texts.add(comp_text)
+        cache = self._llm_self_message_cache.setdefault(flow_id, [])
+        cache[:] = [item for item in cache if float(item.get("expires_at", 0)) > time.time()]
+        for cached_text in cached_texts:
+            cache.append({"text": cached_text, "expires_at": expires_at})
+
+    def _is_recent_llm_self_message(self, flow_id: str, text: str) -> bool:
+        normalized = self._message_fingerprint(text)
+        if not normalized:
+            return False
+        now = time.time()
+        cache = self._llm_self_message_cache.get(flow_id, [])
+        cache[:] = [item for item in cache if float(item.get("expires_at", 0)) > now]
+        for item in cache:
+            cached_text = self._message_fingerprint(item.get("text", ""))
+            if not cached_text:
+                continue
+            if normalized == cached_text:
+                return True
+            if len(normalized) >= 10 and normalized in cached_text:
+                return True
+            if len(cached_text) >= 10 and cached_text in normalized:
+                return True
+        return False
+
     def _record_from_event(self, event: AstrMessageEvent) -> dict[str, Any]:
         timestamp = int(getattr(event.message_obj, "timestamp", 0) or time.time())
         return {
@@ -133,16 +178,26 @@ class GroupContextFlowPlugin(Star):
             return None
 
         record = self._record_from_event(event)
+        flow_id = record["flow_id"]
+        is_self_message = (
+            bool(record["sender_id"])
+            and bool(record["self_id"])
+            and record["sender_id"] == record["self_id"]
+        )
+        if is_self_message and self._is_recent_llm_self_message(flow_id, record["text"]):
+            if bool(self._cfg("debug_log", False)):
+                logger.debug(
+                    f"[{PLUGIN_NAME}] skipped llm self message flow_id={flow_id} message_id={record['message_id']}"
+                )
+            return None
         if (
             not bool(self._cfg("record_self_messages", False))
-            and record["sender_id"]
-            and record["sender_id"] == record["self_id"]
+            and is_self_message
         ):
             return None
         if not bool(self._cfg("record_empty_messages", True)) and not record["text"]:
             return None
 
-        flow_id = record["flow_id"]
         async with self._lock_for(flow_id):
             seq = self.store.append_record(flow_id, record)
         event.set_extra("_group_context_flow_seq", seq)
@@ -284,6 +339,7 @@ class GroupContextFlowPlugin(Star):
     @filter.on_llm_response(priority=-maxsize + 20)
     async def update_flow_cursor(self, event: AstrMessageEvent, resp: LLMResponse):
         """LLM 有响应后推进 cursor，避免下一轮重复注入同一段群聊历史。"""
+        self._remember_llm_self_message(event, resp)
         pending = event.get_extra("_group_context_flow_pending_cursor")
         if not isinstance(pending, dict) or not resp:
             return

@@ -34,7 +34,7 @@
       "record_self_messages": {
         "type": "bool",
         "description": "记录机器人自己的平台消息",
-        "hint": "通常不需要开启；AstrBot 会把 LLM 回复保存为 assistant 历史。",
+        "hint": "仅针对非 LLM 流程产生的机器人自身平台消息；LLM 回复始终会被跳过，因为 AstrBot 已作为 assistant 历史保存。",
         "default": false
       },
       "record_empty_messages": {
