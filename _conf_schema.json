@@ -1,0 +1,87 @@
+{
+  "flow_settings": {
+    "type": "object",
+    "description": "Flow 设置",
+    "hint": "控制群聊消息流水的记录与注入",
+    "items": {
+      "enabled": {
+        "type": "bool",
+        "description": "启用插件",
+        "default": true
+      },
+      "max_log_records": {
+        "type": "int",
+        "description": "每个群保留的最大原始消息数",
+        "hint": "0 表示不限制。原始日志只用于增量注入，AstrBot 会话历史仍由 AstrBot 自己保存/压缩。",
+        "default": 5000,
+        "slider": {
+          "min": 0,
+          "max": 50000,
+          "step": 100
+        }
+      },
+      "max_delta_messages": {
+        "type": "int",
+        "description": "单次最多注入的增量消息数",
+        "hint": "0 表示不限制；若首次启用时群聊日志很长，可设置上限避免一次注入过多。",
+        "default": 0,
+        "slider": {
+          "min": 0,
+          "max": 1000,
+          "step": 10
+        }
+      },
+      "record_self_messages": {
+        "type": "bool",
+        "description": "记录机器人自己的平台消息",
+        "hint": "通常不需要开启；AstrBot 会把 LLM 回复保存为 assistant 历史。",
+        "default": false
+      },
+      "record_empty_messages": {
+        "type": "bool",
+        "description": "记录空文本消息",
+        "hint": "开启后图片、语音等无文本消息会以概要占位进入 flow。",
+        "default": true
+      },
+      "warn_builtin_ltm": {
+        "type": "bool",
+        "description": "检测到内置聊天记忆增强时输出警告",
+        "hint": "建议关闭 AstrBot 内置群聊上下文感知/聊天记忆增强，避免重复注入。",
+        "default": true
+      }
+    }
+  },
+  "format_settings": {
+    "type": "object",
+    "description": "注入格式",
+    "hint": "控制写入 LLM request messages 的 group_flow_delta 格式",
+    "items": {
+      "tag_name": {
+        "type": "string",
+        "description": "增量标签名",
+        "default": "group_flow_delta"
+      },
+      "include_message_id": {
+        "type": "bool",
+        "description": "包含平台消息 ID",
+        "default": true
+      },
+      "include_group_name": {
+        "type": "bool",
+        "description": "包含群名称",
+        "default": true
+      }
+    }
+  },
+  "debug_settings": {
+    "type": "object",
+    "description": "调试设置",
+    "items": {
+      "debug_log": {
+        "type": "bool",
+        "description": "输出调试日志",
+        "default": false
+      }
+    }
+  }
+}
