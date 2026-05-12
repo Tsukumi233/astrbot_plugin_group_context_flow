@@ -51,28 +51,6 @@
       }
     }
   },
-  "format_settings": {
-    "type": "object",
-    "description": "注入格式",
-    "hint": "控制写入 LLM request messages 的 group_flow_delta 格式",
-    "items": {
-      "tag_name": {
-        "type": "string",
-        "description": "增量标签名",
-        "default": "group_flow_delta"
-      },
-      "include_message_id": {
-        "type": "bool",
-        "description": "包含平台消息 ID",
-        "default": true
-      },
-      "include_group_name": {
-        "type": "bool",
-        "description": "包含群名称",
-        "default": true
-      }
-    }
-  },
   "debug_settings": {
     "type": "object",
     "description": "调试设置",

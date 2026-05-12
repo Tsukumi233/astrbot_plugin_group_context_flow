@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import html
 import time
 from datetime import datetime
 from pathlib import Path
@@ -29,9 +28,6 @@ CONFIG_PATHS = {
     "record_self_messages": ("flow_settings", "record_self_messages"),
     "record_empty_messages": ("flow_settings", "record_empty_messages"),
     "warn_builtin_ltm": ("flow_settings", "warn_builtin_ltm"),
-    "tag_name": ("format_settings", "tag_name"),
-    "include_message_id": ("format_settings", "include_message_id"),
-    "include_group_name": ("format_settings", "include_group_name"),
     "debug_log": ("debug_settings", "debug_log"),
 }
 
@@ -42,9 +38,6 @@ CONFIG_DEFAULTS = {
     "record_self_messages": False,
     "record_empty_messages": True,
     "warn_builtin_ltm": True,
-    "tag_name": "group_flow_delta",
-    "include_message_id": True,
-    "include_group_name": True,
     "debug_log": False,
 }
 
@@ -210,55 +203,56 @@ class GroupContextFlowPlugin(Star):
 
     def _format_time(self, timestamp: int) -> str:
         try:
-            return datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d %H:%M:%S")
+            return datetime.fromtimestamp(timestamp).strftime("%H:%M:%S")
         except (OSError, OverflowError, ValueError):
             return ""
 
-    def _escape_attr(self, value: Any) -> str:
-        return html.escape(_clean_one_line(value), quote=True)
-
-    def _escape_text(self, value: Any) -> str:
-        return html.escape(_clean_one_line(value), quote=False)
-
     def _format_delta(self, records: list[dict[str, Any]]) -> str:
-        tag = _clean_one_line(self._cfg("tag_name", "group_flow_delta")) or "group_flow_delta"
-        first = records[0]
-        last = records[-1]
-        attrs = {
-            "platform_id": first.get("platform_id", ""),
-            "group_id": first.get("group_id", ""),
-            "seq_start": first.get("seq", ""),
-            "seq_end": last.get("seq", ""),
-            "current_message_excluded": "true",
-        }
-        if bool(self._cfg("include_group_name", True)) and first.get("group_name"):
-            attrs["group_name"] = first.get("group_name", "")
-
-        attr_text = " ".join(
-            f'{name}="{self._escape_attr(value)}"' for name, value in attrs.items()
-        )
-        lines = [f"<{tag} {attr_text}>"]
-
-        include_message_id = bool(self._cfg("include_message_id", True))
+        lines = []
         for record in records:
-            message_attrs = {
-                "seq": record.get("seq", ""),
-                "time": self._format_time(int(record.get("timestamp") or 0)),
-                "sender_id": record.get("sender_id", ""),
-                "sender_name": record.get("sender_name", ""),
-            }
-            if include_message_id:
-                message_attrs["message_id"] = record.get("message_id", "")
-            message_attr_text = " ".join(
-                f'{name}="{self._escape_attr(value)}"'
-                for name, value in message_attrs.items()
+            sender_name = _clean_one_line(record.get("sender_name")) or _clean_one_line(
+                record.get("sender_id")
             )
+            timestamp = self._format_time(int(record.get("timestamp") or 0))
+            text = _clean_one_line(record.get("text")) or "[消息]"
             lines.append(
-                f"  <message {message_attr_text}>{self._escape_text(record.get('text', ''))}</message>"
+                f"[{sender_name}/{timestamp}]: {text}"
+                if timestamp
+                else f"[{sender_name}]: {text}"
             )
+        return "\n---\n".join(lines)
 
-        lines.append(f"</{tag}>")
-        return "\n".join(lines)
+    def _context_texts(self, contexts: list[dict]) -> list[str]:
+        texts: list[str] = []
+        for item in contexts:
+            if not isinstance(item, dict):
+                continue
+            content = item.get("content", "")
+            if isinstance(content, str):
+                texts.append(self._message_fingerprint(content))
+            elif isinstance(content, list):
+                parts = []
+                for part in content:
+                    if isinstance(part, dict) and part.get("type") == "text":
+                        parts.append(str(part.get("text", "")))
+                if parts:
+                    texts.append(self._message_fingerprint(" ".join(parts)))
+        return [text for text in texts if text]
+
+    def _record_already_in_context(
+        self, record: dict[str, Any], context_texts: list[str]
+    ) -> bool:
+        text = self._message_fingerprint(record.get("text", ""))
+        if not text:
+            return False
+        for context_text in context_texts:
+            if text == context_text:
+                return True
+            if len(text) >= 10 and text in context_text:
+                return True
+            if len(context_text) >= 10 and context_text in text:
+                return True
+        return False
 
     def _builtin_ltm_enabled(self, event: AstrMessageEvent) -> bool:
         try:
@@ -300,11 +294,16 @@ class GroupContextFlowPlugin(Star):
         conversation_id = req.conversation.cid
         async with self._lock_for(flow_id):
             cursor = self.store.get_cursor(flow_id, conversation_id)
-            target_seq = max(0, current_seq - 1)
-            records = self.store.get_range(flow_id, cursor + 1, target_seq)
+            inject_until_seq = max(0, current_seq - 1)
+            cursor_target_seq = current_seq
+            records = self.store.get_range(flow_id, cursor + 1, inject_until_seq)
 
-        if not records:
-            return
+        context_texts = self._context_texts(req.contexts)
+        records = [
+            record
+            for record in records
+            if not self._record_already_in_context(record, context_texts)
+        ]
 
         max_delta = int(self._cfg("max_delta_messages", 0) or 0)
         skipped_count = 0
@@ -312,28 +311,24 @@ class GroupContextFlowPlugin(Star):
             skipped_count = len(records) - max_delta
             records = records[-max_delta:]
 
-        delta_text = self._format_delta(records)
-        if skipped_count:
-            delta_text = (
-                f"<!-- {skipped_count} older group flow messages were not injected because max_delta_messages is set. -->\n"
-                f"{delta_text}"
-            )
-
-        req.contexts.append({"role": "user", "content": delta_text})
         event.set_extra(
             "_group_context_flow_pending_cursor",
             {
                 "flow_id": flow_id,
                 "conversation_id": conversation_id,
-                "target_seq": target_seq,
+                "target_seq": cursor_target_seq,
                 "injected_count": len(records),
             },
         )
         event.set_extra("_group_context_flow_injected", True)
+        if records:
+            req.contexts.append({"role": "user", "content": self._format_delta(records)})
         if bool(self._cfg("debug_log", False)):
+            skipped_text = f" skipped={skipped_count}" if skipped_count else ""
             logger.debug(
                 f"[{PLUGIN_NAME}] injected flow_id={flow_id} conversation={conversation_id} "
-                f"cursor={cursor} target={target_seq} count={len(records)}"
+                f"cursor={cursor} inject_until={inject_until_seq} cursor_target={cursor_target_seq} "
+                f"count={len(records)}{skipped_text}"
             )
 
     @filter.on_llm_response(priority=-maxsize + 20)
