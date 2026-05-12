@@ -1,7 +1,7 @@
 name: astrbot_plugin_group_context_flow
 display_name: 群聊上下文 Flow
 desc: 将群聊非触发消息持久化为连续 flow，并在 LLM 请求前按 conversation 增量注入，兼容 AstrBot 上下文保存与 LLM 压缩。
-version: v0.2.0
+version: v0.2.1
 author: Tsukumi233
 repo: https://github.com/Tsukumi233/astrbot_plugin_group_context_flow
 astrbot_version: ">=4.9.2"

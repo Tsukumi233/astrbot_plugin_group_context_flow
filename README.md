@@ -22,7 +22,7 @@
   },
   {
     "role": "user",
-    "content": "[Bob/20:05:02]: 我不吃辣\n---\n[Carol/20:05:20]: 那寿司更稳"
+    "content": "<group_messages_delta>\n[Bob/20:05:02]: 我不吃辣\n---\n[Carol/20:05:20]: 那寿司更稳\n</group_messages_delta>"
   },
   {
     "role": "user",

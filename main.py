@@ -20,6 +20,7 @@ from .store import GroupFlowStore
 
 
 PLUGIN_NAME = "astrbot_plugin_group_context_flow"
+DELTA_TAG_NAME = "group_messages_delta"
 
 CONFIG_PATHS = {
     "enabled": ("flow_settings", "enabled"),
@@ -220,7 +221,8 @@ class GroupContextFlowPlugin(Star):
                 if timestamp
                 else f"[{sender_name}]: {text}"
             )
-        return "\n---\n".join(lines)
+        body = "\n---\n".join(lines)
+        return f"<{DELTA_TAG_NAME}>\n{body}\n</{DELTA_TAG_NAME}>"
 
     def _context_texts(self, contexts: list[dict]) -> list[str]:
         texts: list[str] = []
