@@ -10,6 +10,7 @@
 - 当前触发 AI 的消息不放进增量上下文，仍保留为 AstrBot 本轮 user prompt；响应成功后 cursor 会推进到当前触发消息，避免下一轮重复出现。
 - LLM 响应后推进 cursor，避免下一轮重复注入。
 - 如果平台把 LLM 回复回流成机器人自己的群消息，插件会无条件跳过；`record_self_messages` 只影响非 LLM 流程产生的机器人自身平台消息。
+- 内置 `/reset` 或 `/new` 成功后，插件会把当前 conversation 的增量边界推进到指令消息本身；原始群聊 flow 不会被清空，但新/重置后的对话不会回灌旧消息。
 - AstrBot 后续会把注入后的 messages 保存到 `conversation.history`，并继续使用自身的上下文截断或 LLM 压缩策略。
 
 ## Request Message 形态

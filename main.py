@@ -13,6 +13,8 @@ from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.provider import LLMResponse, ProviderRequest
 from astrbot.api.star import Context, Star
+from astrbot.core.message.components import Plain
+from astrbot.core.message.message_event_result import MessageEventResult
 from astrbot.core.platform.message_type import MessageType
 from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 
@@ -54,7 +56,7 @@ class GroupContextFlowPlugin(Star):
         self.context = context
         self.config = config or {}
         self._locks: dict[str, asyncio.Lock] = {}
-        self._llm_self_message_cache: dict[str, list[dict[str, Any]]] = {}
+        self._skip_self_message_cache: dict[str, list[dict[str, Any]]] = {}
         self.store = self._build_store()
 
     def _cfg(self, key: str, default: Any = None) -> Any:
@@ -107,6 +109,24 @@ class GroupContextFlowPlugin(Star):
     def _message_fingerprint(self, value: Any) -> str:
         return _clean_one_line(value)
 
+    def _remember_skipped_self_message(
+        self, flow_id: str, texts: set[str], *, ttl: int = 180
+    ) -> None:
+        now = time.time()
+        normalized_texts = {
+            text
+            for text in (self._message_fingerprint(item) for item in texts)
+            if text
+        }
+        if not normalized_texts:
+            return
+
+        cache = self._skip_self_message_cache.setdefault(flow_id, [])
+        cache[:] = [item for item in cache if float(item.get("expires_at", 0)) > now]
+        expires_at = now + ttl
+        for text in normalized_texts:
+            cache.append({"text": text, "expires_at": expires_at})
+
     def _remember_llm_self_message(self, event: AstrMessageEvent, resp: LLMResponse) -> None:
         if event.get_message_type() != MessageType.GROUP_MESSAGE or not event.get_group_id():
             return
@@ -124,17 +144,18 @@ class GroupContextFlowPlugin(Star):
                 comp_text = self._message_fingerprint(getattr(comp, "text", ""))
                 if comp_text:
                     cached_texts.add(comp_text)
-        cache = self._llm_self_message_cache.setdefault(flow_id, [])
-        cache[:] = [item for item in cache if float(item.get("expires_at", 0)) > time.time()]
-        for cached_text in cached_texts:
-            cache.append({"text": cached_text, "expires_at": expires_at})
+        self._remember_skipped_self_message(
+            flow_id,
+            cached_texts,
+            ttl=max(1, int(expires_at - time.time())),
+        )
 
-    def _is_recent_llm_self_message(self, flow_id: str, text: str) -> bool:
+    def _is_recent_skipped_self_message(self, flow_id: str, text: str) -> bool:
         normalized = self._message_fingerprint(text)
         if not normalized:
             return False
         now = time.time()
-        cache = self._llm_self_message_cache.get(flow_id, [])
+        cache = self._skip_self_message_cache.get(flow_id, [])
         cache[:] = [item for item in cache if float(item.get("expires_at", 0)) > now]
         for item in cache:
             cached_text = self._message_fingerprint(item.get("text", ""))
@@ -178,16 +199,13 @@ class GroupContextFlowPlugin(Star):
             and bool(record["self_id"])
             and record["sender_id"] == record["self_id"]
         )
-        if is_self_message and self._is_recent_llm_self_message(flow_id, record["text"]):
+        if is_self_message and self._is_recent_skipped_self_message(flow_id, record["text"]):
             if bool(self._cfg("debug_log", False)):
                 logger.debug(
-                    f"[{PLUGIN_NAME}] skipped llm self message flow_id={flow_id} message_id={record['message_id']}"
+                    f"[{PLUGIN_NAME}] skipped cached self message flow_id={flow_id} message_id={record['message_id']}"
                 )
             return None
-        if (
-            not bool(self._cfg("record_self_messages", False))
-            and is_self_message
-        ):
+        if not bool(self._cfg("record_self_messages", False)) and is_self_message:
             return None
         if not bool(self._cfg("record_empty_messages", True)) and not record["text"]:
             return None
@@ -263,6 +281,77 @@ class GroupContextFlowPlugin(Star):
             return bool(settings.get("group_icl_enable", False))
         except Exception:
             return False
+
+    def _is_reset_or_new_command(self, event: AstrMessageEvent) -> bool:
+        command = _clean_one_line(event.get_message_str()).lstrip("/").split(" ", 1)[0]
+        return command in {"reset", "new"}
+
+    def _result_plain_text(self, result: MessageEventResult | None) -> str:
+        if not result or not result.chain:
+            return ""
+        return self._message_fingerprint(
+            " ".join(comp.text for comp in result.chain if isinstance(comp, Plain))
+        )
+
+    async def _mark_conversation_boundary(
+        self, event: AstrMessageEvent, *, reason: str
+    ) -> None:
+        if event.get_message_type() != MessageType.GROUP_MESSAGE or not event.get_group_id():
+            return
+        if not bool(self._cfg("enabled", True)):
+            return
+
+        current_seq = event.get_extra("_group_context_flow_seq")
+        if not isinstance(current_seq, int):
+            current_seq = await self._ensure_current_record(event)
+        if not current_seq:
+            return
+
+        conversation_id = await self.context.conversation_manager.get_curr_conversation_id(
+            event.unified_msg_origin
+        )
+        if not conversation_id:
+            return
+
+        flow_id = self._flow_id(event)
+        async with self._lock_for(flow_id):
+            self.store.set_cursor(
+                flow_id,
+                conversation_id,
+                current_seq,
+                unified_msg_origin=event.unified_msg_origin,
+            )
+        if bool(self._cfg("debug_log", False)):
+            logger.debug(
+                f"[{PLUGIN_NAME}] boundary marked reason={reason} flow_id={flow_id} "
+                f"conversation={conversation_id} cursor={current_seq}"
+            )
+
+    @filter.on_decorating_result(priority=-maxsize + 20)
+    async def mark_reset_new_boundary(self, event: AstrMessageEvent):
+        """内置 /reset 和 /new 成功后，将当前 conversation 的增量边界移到指令消息。"""
+        if not event.get_extra("_clean_ltm_session", False):
+            return
+        if not self._is_reset_or_new_command(event):
+            return
+        if event.get_message_type() != MessageType.GROUP_MESSAGE or not event.get_group_id():
+            return
+
+        await self._mark_conversation_boundary(event, reason="conversation_command")
+
+        flow_id = self._flow_id(event)
+        command = _clean_one_line(event.get_message_str()).lstrip("/").split(" ", 1)[0]
+        skip_texts = {self._result_plain_text(event.get_result())}
+        if command == "reset":
+            skip_texts.add("Conversation reset successfully.")
+        elif command == "new":
+            conversation_id = await self.context.conversation_manager.get_curr_conversation_id(
+                event.unified_msg_origin
+            )
+            skip_texts.add("New conversation created.")
+            if conversation_id:
+                skip_texts.add(f"Switched to new conversation: {conversation_id[:4]}")
+        self._remember_skipped_self_message(flow_id, skip_texts, ttl=180)
 
     @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE, priority=maxsize - 20)
     async def record_group_message(self, event: AstrMessageEvent):
